@@ -6,8 +6,12 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@vercel/mcp-adapter": "latest",
     "@modelcontextprotocol/sdk": "^1.0.1",
+    "@vercel/mcp-adapter": "latest",
     "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.24",
+    "typescript": "^5.3.3"
   }
 }
