@@ -55,7 +55,7 @@ export default async function handler(req, res) {
           Authorization: `Bearer ${process.env.PERPLEXITY_API_KEY}`
         },
         body: JSON.stringify({
-          model: "sonar-medium-online",
+          model: "sonar-pro",
           messages: input.messages
         })
       });
