@@ -1,11 +1,27 @@
 // api/sse.js
+// ÉN fil som oppfyller ChatGPT-connectorens krav:
+// • OPTIONS  – CORS-pre-flight svar (204)
+// • GET      – SSE-strøm med tools-liste + ping
+// • POST     – tools/call  (både enkel {tool,input} og JSON-RPC)
+
 export default async function handler(req, res) {
-  /* ---------- GET  ⇒  SSE stream ---------- */
+  /* ---------- 0. OPTIONS (CORS pre-flight) ---------- */
+  if (req.method === "OPTIONS") {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    return res.status(204).end();              // tomt svar
+  }
+
+  /* ---------- Felles CORS-header for GET/POST ---------- */
+  res.setHeader("Access-Control-Allow-Origin", "*");
+
+  /* ---------- 1. GET  →  SSE-stream ---------- */
   if (req.method === "GET") {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
-    res.flushHeaders();
+    res.flushHeaders();                        // send headerene straks
 
     const tools = [
       {
@@ -20,23 +36,27 @@ export default async function handler(req, res) {
         }
       }
     ];
+
+    // send tools-liste som første event
     res.write(`event: tools\ndata: ${JSON.stringify({ tools })}\n\n`);
+
+    // hold forbindelsen i live med ping hvert 25s
     const ping = setInterval(() => res.write("event: ping\ndata: {}\n\n"), 25_000);
     req.on("close", () => { clearInterval(ping); res.end(); });
     return;
   }
 
-  /* ---------- POST  ⇒  tools/call ---------- */
+  /* ---------- 2. POST  →  tools/call ---------- */
   if (req.method === "POST") {
     const body = req.body;
 
-    // 1) Håndter JSON-RPC fra ChatGPT-connector
+    // 2a) JSON-RPC-format (ChatGPT-connector)
     if (body?.method === "tools/call") {
       const { tool, input } = body.params ?? {};
       return callPerplexity(tool, input, res, body.id);
     }
 
-    // 2) Håndter enkel { tool, input }  (terminal-testen)
+    // 2b) Enkel { tool, input }  (curl / egen kode)
     if (body?.tool && body?.input) {
       return callPerplexity(body.tool, body.input, res);
     }
@@ -44,10 +64,11 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Bad request" });
   }
 
+  /* ---------- 3. Andre metoder ---------- */
   res.status(405).end();
 }
 
-/* ----- felles funksjon som kaller Perplexity ----- */
+/* ===== Felles funksjon som kaller Perplexity Sonar-pro ===== */
 async function callPerplexity(tool, input, res, rpcId = null) {
   if (tool !== "perplexity_ask" || !input?.messages) {
     return res.status(400).json({ error: "Invalid tool or input" });
@@ -71,11 +92,11 @@ async function callPerplexity(tool, input, res, rpcId = null) {
     const data = await apiRes.json();
 
     const payload = rpcId === null
-      ? { output: data }                       // enkel format
+      ? { output: data }                                 // enkel format
       : { jsonrpc: "2.0", id: rpcId, result: { output: data } }; // JSON-RPC
 
     return res.status(200).json(payload);
-  } catch (e) {
-    return res.status(500).json({ error: e?.toString?.() || "Upstream error" });
+  } catch (err) {
+    return res.status(500).json({ error: err?.toString?.() || "Upstream error" });
   }
 }
