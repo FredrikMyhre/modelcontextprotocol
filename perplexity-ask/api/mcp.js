@@ -2,8 +2,6 @@
 import { z } from "zod";
 import { createMcpHandler } from "@vercel/mcp-adapter";
 
-export const config = { runtime: "edge" }; // Fluid compute
-
 const handler = createMcpHandler(
   /* 1. Definer verktøyene */
   (server) => {
