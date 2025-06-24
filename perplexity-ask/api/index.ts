@@ -1,58 +1,31 @@
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  Tool,
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import type { VercelRequest, VercelResponse } from '@vercel/node'
 
-const PERPLEXITY_ASK_TOOL: Tool = {
-  name: "perplexity_ask",
-  description:
-    "Engages in a conversation using the Sonar API. " +
-    "Accepts an array of messages (each with a role and content) " +
-    "and returns a chat completion response from the Perplexity model.",
-  inputSchema: {
-    type: "object",
-    properties: {
-      messages: {
-        type: "array",
-        items: {
-          type: "object",
-          properties: {
-            role: { type: "string", description: "user | assistant | system" },
-            content: { type: "string", description: "Text content of message" },
-          },
-          required: ["role", "content"],
-        },
-      },
-    },
-    required: ["messages"],
-  },
-};
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  const { tool, input } = req.body;
 
-const server = new Server({
-  transport: new StdioServerTransport(),
-  tools: [PERPLEXITY_ASK_TOOL],
-  async call({ tool, input }) {
-    const response = await fetch("https://api.perplexity.ai/chat/completions", {
-      method: "POST",
+  if (!process.env.PERPLEXITY_API_KEY) {
+    return res.status(500).json({ error: 'Missing PERPLEXITY_API_KEY' });
+  }
+
+  try {
+    const response = await fetch('https://api.perplexity.ai/chat/completions', {
+      method: 'POST',
       headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.PERPLEXITY_API_KEY}`,
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
       },
       body: JSON.stringify({
-        model: "sonar-medium-online",
-        messages: input.messages,
-      }),
+        model: 'sonar-medium-online',
+        messages: input.messages
+      })
     });
 
     const result = await response.json();
-    return {
+    res.status(200).json({
       tool_call_id: tool.name,
-      output: result,
-    };
-  },
-});
-
-server.listen();
+      output: result
+    });
+  } catch (e) {
+    res.status(500).json({ error: e?.toString?.() || 'Unknown error' });
+  }
+}
