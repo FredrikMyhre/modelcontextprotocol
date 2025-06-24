@@ -29,8 +29,6 @@ async function callPerplexity(messages: { role: string; content: string }[]): Pr
   return data.choices?.[0]?.message?.content ?? "Fikk ikke et gyldig svar fra Perplexity.";
 }
 
-// ------ HER ER DE VIKTIGE ENDRINGENE ------
-
 const handler = createMcpHandler(
   (server) => {
     // ----- search (Påkrevd av OpenAI) -----
@@ -38,28 +36,23 @@ const handler = createMcpHandler(
       "search",
       "Søker etter informasjon via Perplexity.",
       { query: z.string().describe("Søkespørringen.") },
-      // Funksjonen returnerer nå et enkelt objekt som Vercel-adapteren forstår.
       async ({ query }) => {
         try {
           const replyText = await callPerplexity([{ role: "user", content: query }]);
           
-          // Vi lager det objektet OpenAI forventer å finne INNI tekst-responsen.
           const searchResults = {
             results: [{
               id: Buffer.from(query).toString('base64'),
               title: `Svar for: "${query.substring(0, 50)}..."`,
               text: replyText.substring(0, 400) + '...',
-              url: null, // Viktig for kompatibilitet
+              url: null,
             }]
           };
 
-          // Vi returnerer en enkel tekst-respons med en JSON-streng som innhold.
-          // Dette er det korrekte formatet for denne adapteren.
           return {
             content: [{ type: "text", text: JSON.stringify(searchResults) }],
           };
         } catch (error: any) {
-          // Feilmeldingen blir også pakket som en JSON-streng.
           return {
             isError: true,
             content: [{ type: "text", text: JSON.stringify({ error: error.message }) }],
@@ -78,7 +71,6 @@ const handler = createMcpHandler(
           const originalQuery = Buffer.from(id, 'base64').toString('utf-8');
           const fullText = await callPerplexity([{ role: "user", content: originalQuery }]);
 
-          // Lager objektet OpenAI forventer å finne INNI tekst-responsen.
           const fetchResult = {
             id: id,
             title: `Fullt svar for: "${originalQuery}"`,
@@ -87,7 +79,6 @@ const handler = createMcpHandler(
             metadata: null
           };
 
-          // Returnerer det som en enkel tekst-respons med en JSON-streng.
           return {
             content: [{ type: "text", text: JSON.stringify(fetchResult) }],
           };
@@ -100,7 +91,6 @@ const handler = createMcpHandler(
       }
     );
   }
-  // Merk: Ingen ekstra metadata-objekt her.
 );
 
 export const GET = handler;
