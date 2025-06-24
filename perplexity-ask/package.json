@@ -33,7 +33,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.1",
-    "@vercel/node": "^2.16.8",           // ➕ lagt til
+    "@vercel/node": "^2.16.8",
     "axios": "^1.6.2",
     "dotenv": "^16.3.1"
   },
