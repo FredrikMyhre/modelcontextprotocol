@@ -1,6 +1,3 @@
-// Ensure Node Serverless runtime
-export const config = { runtime: "nodejs" };
-
 // api/mcp.js
 import { z } from "zod";
 import { createMcpHandler } from "@vercel/mcp-adapter";
