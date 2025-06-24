@@ -1,15 +1,15 @@
 /* -----------------------------------------------------------
- *  MCP remote server – single file for Vercel
- *  • HEAD / OPTIONS / GET (SSE JSON-lines) / POST (JSON-RPC)
- *  • Tools: search, fetch (required by ChatGPT Deep Research)
- *  • Extra tool: perplexity_ask  (live web-søk via Perplexity)
+ *  Vercel MCP-server (single file)
+ *  • Tools: search, fetch, perplexity_ask
+ *  • SSE JSON-lines with `data:` prefix  (required by OpenAI UI)
+ *  • HEAD / OPTIONS / GET / POST  implemented
  * ---------------------------------------------------------- */
 
+/* ---------- Verktøydefinisjoner ---------- */
 const TOOLS = [
   {
     name: "search",
-    description:
-      "Searches news and web documents. Input is a natural-language query string.",
+    description: "Searches news and web documents. Input is a natural-language query string.",
     input_schema: {
       type: "object",
       properties: { query: { type: "string" } },
@@ -18,8 +18,7 @@ const TOOLS = [
   },
   {
     name: "fetch",
-    description:
-      "Fetches the full text for a given document id returned by search.",
+    description: "Fetches the full text for a given document id returned by search.",
     input_schema: {
       type: "object",
       properties: { id: { type: "string" } },
@@ -31,46 +30,55 @@ const TOOLS = [
     description: "Live web-søk via Perplexity Sonar-pro",
     input_schema: {
       type: "object",
-      properties: {
-        messages: { type: "array" }
-      },
+      properties: { messages: { type: "array" } },
       required: ["messages"]
     }
   }
 ];
 
-/* ---------- Helper ---------- */
+/* ---------- Hjelpere ---------- */
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET,POST,OPTIONS,HEAD"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS,HEAD");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
-function jsonLine(obj) {
-  return JSON.stringify(obj) + "\n\n";
+function jsonRpc(id, resultOrError) {
+  return { jsonrpc: "2.0", id, ...resultOrError };
+}
+function readBody(req) {
+  return new Promise((resolve) => {
+    let data = "";
+    req.on("data", (c) => (data += c));
+    req.on("end", () => resolve(data));
+  });
 }
 
 /* ---------- Main handler ---------- */
 export default async function handler(req, res) {
-  /* HEAD / OPTIONS */
   cors(res);
+
+  /* HEAD – helse-sjekk */
   if (req.method === "HEAD") return res.status(200).end();
+
+  /* OPTIONS – preflight */
   if (req.method === "OPTIONS") return res.status(204).end();
 
-  /* GET  →  SSE JSON-lines */
+  /* GET  →  SSE JSON-linjer  */
   if (req.method === "GET") {
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
       Connection: "keep-alive"
     });
-    // send verktøyliste som første linje
+
+    /* verktøyliste som første linje (må ha data:-prefiks) */
     res.write(
-      jsonLine({ jsonrpc: "2.0", id: 0, result: { tools: TOOLS } })
+      "data: " +
+        JSON.stringify(jsonRpc(0, { result: { tools: TOOLS } })) +
+        "\n\n"
     );
-    // ping hvert 20 s
+
+    /* ping som kommentar hvert 20 s */
     const ping = setInterval(() => res.write(":\n\n"), 20000);
     req.on("close", () => {
       clearInterval(ping);
@@ -81,78 +89,72 @@ export default async function handler(req, res) {
 
   /* POST  →  JSON-RPC */
   if (req.method === "POST") {
-    let body = req.body;
-    if (!body || typeof body !== "object") {
-      body = await new Promise((resolve) => {
-        let data = "";
-        req.on("data", (c) => (data += c));
-        req.on("end", () => resolve(JSON.parse(data || "{}")));
-      });
+    const raw = typeof req.body === "object" ? JSON.stringify(req.body) : await readBody(req);
+    let body;
+    try {
+      body = JSON.parse(raw || "{}");
+    } catch {
+      return res.status(400).json({ error: "Invalid JSON" });
     }
 
     const { id, method, params } = body;
 
-    /* ---------- tools/list ---------- */
+    /* tools/list */
     if (method === "tools/list") {
-      return res
-        .status(200)
-        .json({ jsonrpc: "2.0", id, result: { tools: TOOLS } });
+      return res.status(200).json(jsonRpc(id, { result: { tools: TOOLS } }));
     }
 
-    /* ---------- tools/call ---------- */
+    /* tools/call */
     if (method === "tools/call") {
       const { tool, input } = params ?? {};
 
       /* search – dummy result */
       if (tool === "search") {
-        const q = input?.query || "";
-        return res.status(200).json({
-          jsonrpc: "2.0",
-          id,
-          result: {
-            output: {
-              results: [
-                {
-                  id: "dummy-1",
-                  title: `Simulated result for “${q}”`,
-                  text: "This is placeholder text.",
-                  url: null
-                }
-              ]
+        const query = input?.query ?? "";
+        return res.status(200).json(
+          jsonRpc(id, {
+            result: {
+              output: {
+                results: [
+                  {
+                    id: "dummy-1",
+                    title: `Simulated result for “${query}”`,
+                    text: "This is placeholder text.",
+                    url: null
+                  }
+                ]
+              }
             }
-          }
-        });
+          })
+        );
       }
 
-      /* fetch – dummy text */
+      /* fetch – dummy doc */
       if (tool === "fetch") {
-        return res.status(200).json({
-          jsonrpc: "2.0",
-          id,
-          result: {
-            output: {
-              id: input?.id,
-              title: "Dummy document",
-              text: "Full text for the dummy document.",
-              url: null,
-              metadata: null
+        return res.status(200).json(
+          jsonRpc(id, {
+            result: {
+              output: {
+                id: input?.id,
+                title: "Dummy document",
+                text: "Full text for the dummy document.",
+                url: null,
+                metadata: null
+              }
             }
-          }
-        });
+          })
+        );
       }
 
       /* perplexity_ask – live web via Perplexity */
       if (tool === "perplexity_ask") {
         if (!process.env.PERPLEXITY_API_KEY) {
-          return res.status(500).json({
-            jsonrpc: "2.0",
-            id,
-            error: { code: -32000, message: "Missing PERPLEXITY_API_KEY" }
-          });
+          return res.status(500).json(
+            jsonRpc(id, { error: { code: -32000, message: "Missing PERPLEXITY_API_KEY" } })
+          );
         }
-        const upstream = await fetch(
-          "https://api.perplexity.ai/chat/completions",
-          {
+        try {
+          const upstream = await fetch("https://api.perplexity.ai/chat/completions", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -162,32 +164,22 @@ export default async function handler(req, res) {
               model: "sonar-pro",
               messages: input?.messages || []
             })
-          }
-        );
-        const data = await upstream.json();
-        return res.status(200).json({
-          jsonrpc: "2.0",
-          id,
-          result: { output: data }
-        });
+          });
+          const data = await upstream.json();
+          return res.status(200).json(jsonRpc(id, { result: { output: data } }));
+        } catch (err) {
+          return res.status(502).json(jsonRpc(id, { error: { code: -32099, message: String(err) } }));
+        }
       }
 
       /* ukjent verktøy */
-      return res.status(400).json({
-        jsonrpc: "2.0",
-        id,
-        error: { code: -32602, message: "Unknown tool" }
-      });
+      return res.status(400).json(jsonRpc(id, { error: { code: -32602, message: "Unknown tool" } }));
     }
 
     /* ukjent metode */
-    return res.status(400).json({
-      jsonrpc: "2.0",
-      id,
-      error: { code: -32601, message: "Unsupported method" }
-    });
+    return res.status(400).json(jsonRpc(id, { error: { code: -32601, message: "Unsupported method" } }));
   }
 
-  /* Andre metoder */
+  /* Andre metoder → 405 */
   res.status(405).end();
 }
