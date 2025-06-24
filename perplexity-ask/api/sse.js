@@ -1,20 +1,6 @@
-// api/sse.js  — full MCP minimal‐server (SSE + POST)
-import { TextDecoder } from "util";
-
-const TOOLS_LIST = [
-  {
-    name: "perplexity_ask",
-    description: "Live web-søk via Perplexity Sonar-pro",
-    input_schema: {
-      type: "object",
-      properties: { messages: { type: "array" } },
-      required: ["messages"]
-    }
-  }
-];
-
-/* ---------------- OPTIONS (CORS) ---------------- */
-export default async function handler(req, res) {
+// api/sse.js  – sender JSON-RPC tools/list resultat på SSE
+export default function handler(req, res) {
+  /* CORS pre-flight */
   if (req.method === "OPTIONS") {
     res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -24,73 +10,57 @@ export default async function handler(req, res) {
 
   res.setHeader("Access-Control-Allow-Origin", "*");
 
-  /* ---------------- GET  →  SSE ---------------- */
+  /* SSE endpoint */
   if (req.method === "GET") {
     res.setHeader("Content-Type", "text/event-stream");
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Connection", "keep-alive");
     res.flushHeaders();
 
-    // Ping hvert 25 s
+    const tools = [{
+      name: "perplexity_ask",
+      description: "Live web-søk via Perplexity Sonar-pro",
+      input_schema: {
+        type: "object",
+        properties: { messages: { type: "array" } },
+        required: ["messages"]
+      }
+    }];
+
+    /* Send som JSON-RPC-response id = 0 */
+    const payload = {
+      jsonrpc: "2.0",
+      id: 0,
+      result: { tools }
+    };
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+
+    /* Hold forbindelsen med ping */
     const ping = setInterval(() => res.write("event: ping\ndata: {}\n\n"), 25_000);
     req.on("close", () => { clearInterval(ping); res.end(); });
-
-    // Buffer innkommende bytes → linjer
-    let buffer = "";
-    req.on("data", chunk => {
-      buffer += new TextDecoder().decode(chunk);
-      let nl;
-      while ((nl = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, nl).trim();
-        buffer = buffer.slice(nl + 1);
-        if (!line) continue;
-        try {
-          const msg = JSON.parse(line);
-          if (msg.method === "tools/list") {
-            const payload = {
-              jsonrpc: "2.0",
-              id: msg.id,
-              result: { tools: TOOLS_LIST }
-            };
-            res.write(`data: ${JSON.stringify(payload)}\n\n`);
-          }
-        } catch { /* ignore parse errors */ }
-      }
-    });
     return;
   }
 
-  /* ---------------- POST  →  tools/call ---------------- */
+  /* POST → tools/call */
   if (req.method === "POST") {
-    const body = req.body || {};
-    const { tool, input } =
-      body.method === "tools/call" ? body.params ?? {} : body; // JSON-RPC eller enkel
-
-    if (tool !== "perplexity_ask" || !input?.messages) {
+    const { tool, input } = req.body ?? {};
+    if (tool !== "perplexity_ask" || !input?.messages)
       return res.status(400).json({ error: "Invalid tool/input" });
-    }
-    if (!process.env.PERPLEXITY_API_KEY) {
+    if (!process.env.PERPLEXITY_API_KEY)
       return res.status(500).json({ error: "Missing PERPLEXITY_API_KEY" });
-    }
 
-    try {
-      const r = await fetch("https://api.perplexity.ai/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.PERPLEXITY_API_KEY}`
-        },
-        body: JSON.stringify({ model: "sonar-pro", messages: input.messages })
-      });
-      const data = await r.json();
-      const out =
-        body.method === "tools/call"
-          ? { jsonrpc: "2.0", id: body.id, result: { output: data } }
-          : { output: data };
-      return res.status(200).json(out);
-    } catch (e) {
-      return res.status(500).json({ error: e?.toString?.() || "Upstream error" });
-    }
+    fetch("https://api.perplexity.ai/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.PERPLEXITY_API_KEY}`
+      },
+      body: JSON.stringify({ model: "sonar-pro", messages: input.messages })
+    })
+      .then(r => r.json())
+      .then(data => res.status(200).json({ output: data }))
+      .catch(e => res.status(500).json({ error: e?.toString?.() || "Upstream error" }));
+    return;
   }
 
   res.status(405).end();
