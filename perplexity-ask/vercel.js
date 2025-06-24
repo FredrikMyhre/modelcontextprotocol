@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/mcp.ts": {
+      "runtime": "nodejs18.x"
+    }
+  }
+}
