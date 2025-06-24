@@ -1,31 +1,78 @@
-import type { VercelRequest, VercelResponse } from '@vercel/node'
+// api/index.js  (én eneste fil)
 
-export default async function handler(req: VercelRequest, res: VercelResponse) {
-  const { tool, input } = req.body;
+export default async function handler(req, res) {
+  const { id, method, params } = req.body ?? {};
 
-  if (!process.env.PERPLEXITY_API_KEY) {
-    return res.status(500).json({ error: 'Missing PERPLEXITY_API_KEY' });
+  /* ---------- 1. tools/list ---------- */
+  if (method === "tools/list") {
+    return res.status(200).json({
+      jsonrpc: "2.0",
+      id,
+      result: {
+        tools: [
+          {
+            name: "perplexity_ask",
+            description: "Live web-søk via Perplexity Sonar API",
+            input_schema: {
+              type: "object",
+              properties: {
+                messages: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      role: { type: "string" },
+                      content: { type: "string" }
+                    },
+                    required: ["role", "content"]
+                  }
+                }
+              },
+              required: ["messages"]
+            }
+          }
+        ]
+      }
+    });
   }
 
-  try {
-    const response = await fetch('https://api.perplexity.ai/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.PERPLEXITY_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: 'sonar-medium-online',
-        messages: input.messages
-      })
-    });
+  /* ---------- 2. tools/call ---------- */
+  if (method === "tools/call") {
+    const { tool, input } = params ?? {};
 
-    const result = await response.json();
-    res.status(200).json({
-      tool_call_id: tool.name,
-      output: result
-    });
-  } catch (e) {
-    res.status(500).json({ error: e?.toString?.() || 'Unknown error' });
+    if (tool !== "perplexity_ask" || !input?.messages) {
+      return res.status(400).json({ error: "Invalid tool or input" });
+    }
+    if (!process.env.PERPLEXITY_API_KEY) {
+      return res.status(500).json({ error: "Missing PERPLEXITY_API_KEY" });
+    }
+
+    try {
+      const apiRes = await fetch("https://api.perplexity.ai/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${process.env.PERPLEXITY_API_KEY}`
+        },
+        body: JSON.stringify({
+          model: "sonar-medium-online",
+          messages: input.messages
+        })
+      });
+
+      const data = await apiRes.json();
+      return res.status(200).json({
+        jsonrpc: "2.0",
+        id,
+        result: { output: data }
+      });
+    } catch (err) {
+      return res
+        .status(500)
+        .json({ error: err?.toString?.() || "Upstream error" });
+    }
   }
+
+  /* ---------- 3. ukjent metode ---------- */
+  res.status(400).json({ error: "Unsupported method" });
 }
