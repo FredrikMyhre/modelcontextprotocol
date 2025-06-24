@@ -1,6 +1,6 @@
 // api/sse.js
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import { VercelSseTransport } from "@modelcontextprotocol/sdk/server/vercel-sse.js";
+import { VercelSseTransport } from "@modelcontextprotocol/sdk/server/vercel-sse";
 
 /* definer (det samme) verktøyet */
 const tools = [
