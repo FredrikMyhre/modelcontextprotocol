@@ -1,7 +1,7 @@
-// api/mcp.ts
 import { z } from "zod";
-// Importerer de spesifikke typene for respons-objekter for å sikre 100% kompatibilitet.
-import { createMcpHandler, McpToolResponse, McpSearchResult, McpServerOptions } from "@vercel/mcp-adapter";
+// Importerer fra riktige pakker
+import { createMcpHandler } from "@vercel/mcp-adapter";
+import type { ToolResult, Resource } from "@modelcontextprotocol/sdk/types";
 
 /**
  * Henter Perplexity API-nøkkel fra miljøvariabler.
@@ -9,14 +9,12 @@ import { createMcpHandler, McpToolResponse, McpSearchResult, McpServerOptions } 
 const perplexityApiKey = process.env.PERPLEXITY_API_KEY;
 
 /**
- * Funksjon for å kalle Perplexity API. Gjenbrukes av verktøyene.
- * @param messages - Samtalehistorikk som sendes til Perplexity.
- * @returns Svaret fra Perplexity som en tekststreng.
+ * Funksjon for å kalle Perplexity API.
  */
 async function callPerplexity(messages: { role: string; content: string }[]): Promise<string> {
   if (!perplexityApiKey) {
-    console.error("PERPLEXITY_API_KEY er ikke satt i miljøvariablene.");
-    throw new Error("Perplexity API-nøkkel er ikke konfigurert på serveren.");
+    console.error("PERPLEXITY_API_KEY er ikke satt.");
+    throw new Error("Perplexity API-nøkkel er ikke konfigurert.");
   }
 
   const response = await fetch("https://api.perplexity.ai/chat/completions", {
@@ -25,10 +23,7 @@ async function callPerplexity(messages: { role: string; content: string }[]): Pr
       "Content-Type": "application/json",
       Authorization: `Bearer ${perplexityApiKey}`,
     },
-    body: JSON.stringify({
-      model: "sonar-pro",
-      messages,
-    }),
+    body: JSON.stringify({ model: "sonar-pro", messages }),
   });
 
   if (!response.ok) {
@@ -41,82 +36,80 @@ async function callPerplexity(messages: { role: string; content: string }[]): Pr
   return data.choices?.[0]?.message?.content ?? "Fikk ikke et gyldig svar fra Perplexity.";
 }
 
-/**
- * Metadatainformasjon for serveren.
- * OpenAI kan vise 'description' i sitt UI.
- */
-const serverOptions: McpServerOptions = {
-    name: "Perplexity via Vercel",
-    version: "1.1.0",
-    description: "En MCP-server som bruker Perplexity API for å svare på spørsmål i sanntid.",
-    // Spesifiserer at ingen egen-laget autentisering er i bruk.
-    authentication: {
-      type: 'none',
-    },
-};
-
 const handler = createMcpHandler(
   (server) => {
-    // ----- search (Påkrevd av OpenAI Connector) -----
+    // ----- search (Påkrevd av OpenAI) -----
     server.tool(
       "search",
-      "Søker etter informasjon ved hjelp av en spørring via Perplexity.",
-      {
-        query: z.string().describe("Søkespørringen."),
-      },
-      // Returnerer en Promise som resolverer til et objekt med en 'results'-liste.
-      async ({ query }): Promise<{ results: McpSearchResult[] }> => {
+      "Søker etter informasjon via Perplexity.",
+      { query: z.string().describe("Søkespørringen.") },
+      // Denne funksjonen må returnere en standard ToolResult
+      async ({ query }): Promise<ToolResult> => {
         try {
           const replyText = await callPerplexity([{ role: "user", content: query }]);
-
-          const searchResult: McpSearchResult = {
+          
+          // OpenAI forventer en liste med resultater i 'text'-feltet.
+          // Vi formaterer det som en JSON-streng.
+          const searchResults = [{
             id: Buffer.from(query).toString('base64'),
-            title: `Svar for: "${query.substring(0, 50)}${query.length > 50 ? '...' : ''}"`,
+            title: `Svar for: "${query.substring(0, 50)}..."`,
             text: replyText.substring(0, 400) + '...',
             url: null,
+          }];
+
+          // Pakker resultatene inn i det korrekte formatet.
+          return {
+            content: [{ type: "text", text: JSON.stringify({ results: searchResults }) }],
           };
 
-          return { results: [searchResult] };
         } catch (error: any) {
           console.error("Feil i 'search'-verktøyet:", error);
-          // Returner en tom liste ved feil, slik OpenAI-connectoren forventer.
-          return { results: [] };
+          return {
+            isError: true,
+            content: [{ type: "text", text: `Søk feilet: ${error.message}` }],
+          };
         }
       }
     );
 
-    // ----- fetch (Påkrevd av OpenAI Connector) -----
+    // ----- fetch (Påkrevd av OpenAI) -----
     server.tool(
       "fetch",
-      "Henter det fullstendige innholdet for en spesifikk ressurs-ID.",
-      {
-        id: z.string().describe("Base64-kodet ID fra 'search'-resultatet."),
-      },
-      // Returnerer en Promise som resolverer til en McpToolResponse.
-      async ({ id }): Promise<McpToolResponse> => {
+      "Henter fullstendig innhold for en ressurs-ID.",
+      { id: z.string().describe("ID fra 'search'-resultatet.") },
+      // Returnerer også en standard ToolResult
+      async ({ id }): Promise<ToolResult> => {
         try {
           const originalQuery = Buffer.from(id, 'base64').toString('utf-8');
           const fullText = await callPerplexity([{ role: "user", content: originalQuery }]);
 
-          // Dette er det forventede formatet for et vellykket 'fetch'-kall.
-          return {
-            content: [{ type: "text", text: fullText }],
-          };
+          const resource: Resource = {
+            id: id,
+            title: `Fullt svar for: "${originalQuery}"`,
+            text: fullText,
+            url: null,
+            metadata: null
+          }
+
+          // Pakker resultatet inn i det korrekte formatet.
+          return { content: [{ type: "text", text: JSON.stringify(resource) }] };
         } catch (error: any) {
           console.error("Feil i 'fetch'-verktøyet:", error);
-          // Returner en standardisert feilmelding som MCP forstår.
           return {
             isError: true,
-            content: [{ type: "text", text: `Klarte ikke hente ressurs for ID ${id}. Feil: ${error.message}` }],
+            content: [{ type: "text", text: `Innhenting feilet for ID ${id}: ${error.message}` }],
           };
         }
       }
     );
   },
-  serverOptions
+  {
+    name: "Perplexity via Vercel",
+    version: "1.2.0",
+    description: "MCP-server som bruker Perplexity API for sanntidssøk.",
+  }
 );
 
-// Eksporter handleren for Vercel sine serverless funksjoner
 export const GET = handler;
 export const POST = handler;
 export const DELETE = handler;
