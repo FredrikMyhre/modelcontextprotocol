@@ -2,6 +2,12 @@
   "name": "perplexity-mcp",
   "version": "0.1.0",
   "type": "module",
-  "engines": { "node": ">=18" },
-  "dependencies": {}
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@vercel/mcp-adapter": "^0.1.9",
+    "@modelcontextprotocol/sdk": "^1.0.1",
+    "zod": "^3.22.4"
+  }
 }
