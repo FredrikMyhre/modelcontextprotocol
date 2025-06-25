@@ -1,18 +1,14 @@
-// api/mcp.ts  – MCP-server for Perplexity  (Edge Function)
+// api/mcp.ts  –  Node (Serverless) Vercel Function - MCP-server
 
-export const config = { runtime: "edge" };          //  <-- viktig
-
+import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { z } from "zod";
-import { createMcpHandler } from "@vercel/mcp-adapter";
 
 /* ----------  Perplexity helper  ---------- */
 
 const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
 
 async function askPerplexity(query: string): Promise<string> {
-  if (!PERPLEXITY_API_KEY) {
-    throw new Error("PERPLEXITY_API_KEY mangler i miljøvariablene.");
-  }
+  if (!PERPLEXITY_API_KEY) throw new Error("PERPLEXITY_API_KEY mangler");
 
   const r = await fetch("https://api.perplexity.ai/chat/completions", {
     method: "POST",
@@ -35,63 +31,90 @@ async function askPerplexity(query: string): Promise<string> {
   return data?.choices?.[0]?.message?.content ?? "(tomt svar)";
 }
 
-/* ----------  MCP-handler med samme SEARCH & FETCH-logikk  ---------- */
+/* ----------  Verktøy-implementasjoner  ---------- */
 
-const handler = createMcpHandler((server) => {
-  /* ---- search ---- */
-  server.tool(
-    "search",
-    "Søker etter informasjon via Perplexity.",
-    { query: z.string().describe("Søkestreng") },
-    async ({ query }) => {
-      const text = await askPerplexity(query);
+const searchInput = z.object({ query: z.string() });
+const fetchInput  = z.object({ id: z.string() });
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              results: [
-                {
-                  id: Buffer.from(query).toString("base64"),
-                  title: `Svar for: ${query.slice(0, 50)}…`,
-                  text: text.slice(0, 400) + "…",
-                  url: null,
-                },
-              ],
-            }),
-          },
-        ],
-      };
+async function doSearch(input: z.infer<typeof searchInput>) {
+  const text = await askPerplexity(input.query);
+  return {
+    results: [
+      {
+        id: Buffer.from(input.query).toString("base64"),
+        title: `Svar for: ${input.query.slice(0, 50)}…`,
+        text: text.slice(0, 400) + "…",
+        url: null,
+      },
+    ],
+  };
+}
+
+async function doFetch(input: z.infer<typeof fetchInput>) {
+  const original = Buffer.from(input.id, "base64").toString("utf-8");
+  const full = await askPerplexity(original);
+  return {
+    id: input.id,
+    title: `Fullt svar for: ${original}`,
+    text: full,
+    url: null,
+    metadata: null,
+  };
+}
+
+/* ----------  MCP JSON-RPC handler  ---------- */
+
+export default async function handler(req: VercelRequest, res: VercelResponse) {
+  try {
+    const { id, method, params } = req.body ?? {};
+
+    /* tools/list --------------------------------------------------- */
+    if (method === "tools/list") {
+      return res.json({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          tools: [
+            {
+              name: "search",
+              description: "Søker via Perplexity Sonar-pro",
+              input_schema: searchInput,
+            },
+            {
+              name: "fetch",
+              description: "Henter fulltekst fra Perplexity",
+              input_schema: fetchInput,
+            },
+          ],
+        },
+      });
     }
-  );
 
-  /* ---- fetch ---- */
-  server.tool(
-    "fetch",
-    "Henter fulltekst for en ressurs-ID.",
-    { id: z.string() },
-    async ({ id }) => {
-      const original = Buffer.from(id, "base64").toString("utf-8");
-      const full = await askPerplexity(original);
+    /* tools/call --------------------------------------------------- */
+    if (method === "tools/call") {
+      const { tool, input } = params ?? {};
 
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              id,
-              title: `Fullt svar for: ${original}`,
-              text: full,
-              url: null,
-              metadata: null,
-            }),
-          },
-        ],
-      };
+      if (tool === "search") {
+        const parsed = searchInput.parse(input);
+        const output = await doSearch(parsed);
+        return res.json({ jsonrpc: "2.0", id, result: { output } });
+      }
+
+      if (tool === "fetch") {
+        const parsed = fetchInput.parse(input);
+        const output = await doFetch(parsed);
+        return res.json({ jsonrpc: "2.0", id, result: { output } });
+      }
+
+      throw new Error(`Ukjent tool: ${tool}`);
     }
-  );
-});
 
-/* ----------  Eksport for Edge Function ---------- */
-export default handler;
+    /* ukjent metode ------------------------------------------------ */
+    throw new Error(`Ukjent metode: ${method}`);
+  } catch (err: any) {
+    res.status(500).json({
+      jsonrpc: "2.0",
+      error: { code: -32000, message: err.message ?? "Serverfeil" },
+    });
+  }
+}
