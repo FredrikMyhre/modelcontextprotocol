@@ -1,5 +1,8 @@
 // api/mcp.ts   – MCP-handler for Perplexity
 
+// Fortell Vercel at denne funksjonen skal kjøres som Edge Runtime
+export const config = { runtime: "edge" };
+
 import { z } from "zod";
 import { createMcpHandler } from "@vercel/mcp-adapter";
 
