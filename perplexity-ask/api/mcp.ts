@@ -1,101 +1,72 @@
-// api/mcp.ts – MCP server (Streamable HTTP on Vercel Functions)
+// api/mcp.ts – MCP server (Streamable HTTP on Vercel Functions)
 // -----------------------------------------------------------------------------
-// This revision aligns the endpoint 100 % with the MCP 2025‑03‑26 specification
-// so it can be registered as an **OpenAI ChatGPT Connector** without HTTP 500s.
+// v0.3.0 – Return **spec‑compliant tool results** (content[] + isError)
 // -----------------------------------------------------------------------------
 
-/* 1 – Imports */
+/* 1 – Imports */
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { z } from "zod";
 
-/* 2 – Perplexity helper */
+/* 2 – Perplexity helper */
 const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY ?? "";
 
-async function askPerplexity(query: string): Promise<string> {
-  if (!PERPLEXITY_API_KEY) {
-    throw new Error("PERPLEXITY_API_KEY environment‑variable mangler");
-  }
-
+async function askPerplexity(query: string, model: string = "sonar-pro") {
+  if (!PERPLEXITY_API_KEY) throw new Error("PERPLEXITY_API_KEY mangler");
   const r = await fetch("https://api.perplexity.ai/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${PERPLEXITY_API_KEY}`,
     },
-    body: JSON.stringify({
-      model: "sonar-pro",
-      messages: [{ role: "user", content: query }],
-    }),
+    body: JSON.stringify({ model, messages: [{ role: "user", content: query }] }),
   });
-
-  if (!r.ok) {
-    throw new Error(`Perplexity-feil ${r.status}: ${await r.text()}`);
-  }
+  if (!r.ok) throw new Error(`Perplexity-feil ${r.status}: ${await r.text()}`);
   const data = await r.json();
-  return data?.choices?.[0]?.message?.content ?? "(tomt svar)";
+  return data.choices?.[0]?.message?.content ?? "(tomt svar)";
 }
 
-/* 3 – JSON‑schemaer */
-const searchInput = z.object({ query: z.string() });
-const fetchInput = z.object({ id: z.string() });
+/* 3 – Schemas */
+const SearchInput = z.object({ query: z.string() });
+const FetchInput = z.object({ id: z.string() });
 
-/* 4 – Tool‑implementasjoner */
-async function doSearch(i: z.infer<typeof searchInput>) {
-  const txt = await askPerplexity(i.query);
-  return {
-    results: [
-      {
-        id: Buffer.from(i.query).toString("base64"),
-        title: `Svar for: ${i.query.slice(0, 60)}`,
-        text: txt.slice(0, 400) + "…",
-        url: null,
-      },
-    ],
-  };
-}
-
-async function doFetch(i: z.infer<typeof fetchInput>) {
-  const original = Buffer.from(i.id, "base64").toString("utf-8");
-  const txt = await askPerplexity(original);
-  return {
-    id: i.id,
-    title: `Fullt svar for: ${original}`,
-    text: txt,
-    url: null,
-    metadata: null,
-  };
-}
-
-/* 5 – Helpers */
+/* 4 – Spec‑compliant helpers */
 function ok(res: VercelResponse, body: unknown) {
   return res.status(200).json(body);
 }
-
-function rpcError(
-  res: VercelResponse,
-  id: unknown,
-  code: number,
-  message: string,
-  data?: unknown,
-) {
+function rpcError(res: VercelResponse, id: unknown, code: number, message: string) {
   return ok(res, {
     jsonrpc: "2.0",
     id: id ?? null,
-    error: { code, message, data },
+    error: { code, message },
   });
 }
+function textResult(text: string) {
+  return {
+    content: [{ type: "text", text }],
+    isError: false,
+  } as const;
+}
 
-/* 6 – HTTP‑handler */
+/* 5 – Tool implementations */
+async function doSearch(q: string) {
+  const answer = await askPerplexity(q);
+  return textResult(answer);
+}
+async function doFetch(id: string) {
+  const original = Buffer.from(id, "base64").toString("utf-8");
+  const answer = await askPerplexity(original);
+  return textResult(answer);
+}
+
+/* 6 – HTTP handler */
 export default async function handler(req: VercelRequest, res: VercelResponse) {
-  /* CORS (required by ChatGPT Connectors) */
+  // ----- CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "*");
   if (req.method === "OPTIONS") return res.status(204).end();
 
-  /* -------------------------------------------------------------------------- */
-  /* GET: optional SSE stream with a single server_hello event                  */
-  /* -------------------------------------------------------------------------- */
+  // ----- SSE server_hello
   if (req.method === "GET") {
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache");
@@ -106,44 +77,36 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           method: "server_hello",
           params: {
             protocolVersion: "2025-03-26",
-            serverInfo: { name: "Perplexity‑MCP", version: "0.2.0" },
+            serverInfo: { name: "Perplexity‑MCP", version: "0.3.0" },
             capabilities: { tools: { listChanged: false } },
-            instructions: "Bruk verktøyene search og fetch",
+            instructions: "Bruk verktøyene search og fetch",
           },
         }) +
         "\n\n",
     );
-    // Hold the stream open (do not res.end()) so the client can reuse it later.
-    return;
+    return; // keep-alive
   }
 
-  /* -------------------------------------------------------------------------- */
-  /* POST: all JSON‑RPC traffic (Streamable HTTP)                                */
-  /* -------------------------------------------------------------------------- */
+  // ----- POST JSON‑RPC
   try {
-    // The Vercel Node API may leave the body as string – ensure we have an object
-    const body =
-      typeof req.body === "string" && req.body.length
-        ? JSON.parse(req.body)
-        : req.body;
-
+    const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
     const { id, method, params } = body ?? {};
 
-    /* 6.1 initialize */
+    /* initialize */
     if (method === "initialize") {
       return ok(res, {
         jsonrpc: "2.0",
         id,
         result: {
           protocolVersion: "2025-03-26",
-          serverInfo: { name: "Perplexity‑MCP", version: "0.2.0" },
+          serverInfo: { name: "Perplexity‑MCP", version: "0.3.0" },
           capabilities: { tools: { listChanged: false } },
-          instructions: "Bruk verktøyene search og fetch",
+          instructions: "Bruk verktøyene search og fetch",
         },
       });
     }
 
-    /* 6.2 tools/list */
+    /* tools/list */
     if (method === "tools/list") {
       return ok(res, {
         jsonrpc: "2.0",
@@ -152,7 +115,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           tools: [
             {
               name: "search",
-              description: "Søker via Perplexity (Sonar‑pro)",
+              description: "Søker via Perplexity Sonar‑pro",
               inputSchema: {
                 type: "object",
                 properties: { query: { type: "string" } },
@@ -161,7 +124,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
             },
             {
               name: "fetch",
-              description: "Henter fulltekst fra Perplexity",
+              description: "Henter fulltekst fra Perplexity basert på ID",
               inputSchema: {
                 type: "object",
                 properties: { id: { type: "string" } },
@@ -173,31 +136,25 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
       });
     }
 
-    /* 6.3 tools/call */
+    /* tools/call */
     if (method === "tools/call") {
       const { name, arguments: args } = params ?? {};
-
       switch (name) {
         case "search": {
-          const parsed = searchInput.parse(args);
-          const output = await doSearch(parsed);
-          return ok(res, { jsonrpc: "2.0", id, result: output });
+          const { query } = SearchInput.parse(args);
+          return ok(res, { jsonrpc: "2.0", id, result: await doSearch(query) });
         }
         case "fetch": {
-          const parsed = fetchInput.parse(args);
-          const output = await doFetch(parsed);
-          return ok(res, { jsonrpc: "2.0", id, result: output });
+          const { id: fid } = FetchInput.parse(args);
+          return ok(res, { jsonrpc: "2.0", id, result: await doFetch(fid) });
         }
         default:
-          return rpcError(res, id, -32601, `Ukjent tool: ${name}`);
+          return rpcError(res, id, -32601, `Ukjent tool: ${name}`);
       }
     }
 
-    /* 6.4 ukjent metode */
-    return rpcError(res, id, -32601, `Ukjent metode: ${method}`);
+    return rpcError(res, id, -32601, `Ukjent metode: ${method}`);
   } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // -32603 = internal error (JSON‑RPC standard)
-    return rpcError(res, null, -32603, msg);
+    return rpcError(res, null, -32603, err instanceof Error ? err.message : String(err));
   }
 }
