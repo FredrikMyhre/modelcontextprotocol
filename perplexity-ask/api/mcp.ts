@@ -1,50 +1,50 @@
-// api/mcp.ts   – MCP-handler for Perplexity
+// api/mcp.ts  – MCP-server for Perplexity  (Edge Function)
 
-// Fortell Vercel at denne funksjonen skal kjøres som Edge Runtime
-export const config = { runtime: "edge" };
+export const config = { runtime: "edge" };          //  <-- viktig
 
 import { z } from "zod";
 import { createMcpHandler } from "@vercel/mcp-adapter";
 
-/* ----------  Hjelpefunksjon: kaller Perplexity  ---------- */
+/* ----------  Perplexity helper  ---------- */
 
-const perplexityApiKey = process.env.PERPLEXITY_API_KEY;
+const PERPLEXITY_API_KEY = process.env.PERPLEXITY_API_KEY;
 
-async function callPerplexity(
-  messages: { role: string; content: string }[]
-): Promise<string> {
-  if (!perplexityApiKey) {
+async function askPerplexity(query: string): Promise<string> {
+  if (!PERPLEXITY_API_KEY) {
     throw new Error("PERPLEXITY_API_KEY mangler i miljøvariablene.");
   }
 
-  const res = await fetch("https://api.perplexity.ai/chat/completions", {
+  const r = await fetch("https://api.perplexity.ai/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${perplexityApiKey}`,
+      Authorization: `Bearer ${PERPLEXITY_API_KEY}`,
     },
-    body: JSON.stringify({ model: "sonar-pro", messages }),
+    body: JSON.stringify({
+      model: "sonar-pro",
+      messages: [{ role: "user", content: query }],
+    }),
   });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new Error(`Perplexity-feil ${res.status}: ${errText}`);
+  if (!r.ok) {
+    const err = await r.text();
+    throw new Error(`Perplexity-feil ${r.status}: ${err}`);
   }
 
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? "(tomt svar)";
+  const data = await r.json();
+  return data?.choices?.[0]?.message?.content ?? "(tomt svar)";
 }
 
-/* ----------  MCP-handler  ---------- */
+/* ----------  MCP-handler med samme SEARCH & FETCH-logikk  ---------- */
 
 const handler = createMcpHandler((server) => {
-  /* ---- search (kreves av OpenAI) ---- */
+  /* ---- search ---- */
   server.tool(
     "search",
-    "Søker via Perplexity Sonar-pro.",
+    "Søker etter informasjon via Perplexity.",
     { query: z.string().describe("Søkestreng") },
     async ({ query }) => {
-      const answer = await callPerplexity([{ role: "user", content: query }]);
+      const text = await askPerplexity(query);
 
       return {
         content: [
@@ -55,7 +55,7 @@ const handler = createMcpHandler((server) => {
                 {
                   id: Buffer.from(query).toString("base64"),
                   title: `Svar for: ${query.slice(0, 50)}…`,
-                  text: answer.slice(0, 400) + "…",
+                  text: text.slice(0, 400) + "…",
                   url: null,
                 },
               ],
@@ -66,14 +66,14 @@ const handler = createMcpHandler((server) => {
     }
   );
 
-  /* ---- fetch (kreves av OpenAI) ---- */
+  /* ---- fetch ---- */
   server.tool(
     "fetch",
     "Henter fulltekst for en ressurs-ID.",
     { id: z.string() },
     async ({ id }) => {
       const original = Buffer.from(id, "base64").toString("utf-8");
-      const full = await callPerplexity([{ role: "user", content: original }]);
+      const full = await askPerplexity(original);
 
       return {
         content: [
@@ -93,5 +93,5 @@ const handler = createMcpHandler((server) => {
   );
 });
 
-/* ----------  Eksport for Vercel Function ---------- */
+/* ----------  Eksport for Edge Function ---------- */
 export default handler;
