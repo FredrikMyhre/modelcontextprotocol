@@ -1,6 +1,10 @@
-// api/mcp.ts – MCP server (Streamable HTTP on Vercel Functions)
+// api/mcp.ts – MCP server (Vercel Edge Functions)
 // -----------------------------------------------------------------------------
-// v0.3.0 – Return **spec‑compliant tool results** (content[] + isError)
+// v0.4.0 – 100 % spec‑compliant for **deep‑research connectors**
+//   • search → returns `{results:[...]}`
+//   • fetch  → returns full document
+//   • tools definitions expose *inputSchema* **and** *outputSchema*
+//   • JSON‑RPC envelopes unchanged
 // -----------------------------------------------------------------------------
 
 /* 1 – Imports */
@@ -27,35 +31,45 @@ async function askPerplexity(query: string, model: string = "sonar-pro") {
 
 /* 3 – Schemas */
 const SearchInput = z.object({ query: z.string() });
-const FetchInput = z.object({ id: z.string() });
+const FetchInput  = z.object({ id: z.string() });
 
-/* 4 – Spec‑compliant helpers */
-function ok(res: VercelResponse, body: unknown) {
+type SearchOutput = {
+  results: { id: string; title: string; text: string; url: string | null }[];
+};
+
+/* 4 – Tool helpers */
+function okJson(res: VercelResponse, body: unknown) {
   return res.status(200).json(body);
 }
 function rpcError(res: VercelResponse, id: unknown, code: number, message: string) {
-  return ok(res, {
-    jsonrpc: "2.0",
-    id: id ?? null,
-    error: { code, message },
-  });
-}
-function textResult(text: string) {
-  return {
-    content: [{ type: "text", text }],
-    isError: false,
-  } as const;
+  return okJson(res, { jsonrpc: "2.0", id: id ?? null, error: { code, message } });
 }
 
 /* 5 – Tool implementations */
-async function doSearch(q: string) {
-  const answer = await askPerplexity(q);
-  return textResult(answer);
+async function doSearch(query: string): Promise<SearchOutput> {
+  const answer = await askPerplexity(query);
+  return {
+    results: [
+      {
+        id: Buffer.from(query).toString("base64"),
+        title: `Svar for: ${query.slice(0, 80)}…`,
+        text: answer.slice(0, 400) + (answer.length > 400 ? "…" : ""),
+        url: null, // Perplexity doesn’t give canonical URL per answer
+      },
+    ],
+  };
 }
+
 async function doFetch(id: string) {
   const original = Buffer.from(id, "base64").toString("utf-8");
-  const answer = await askPerplexity(original);
-  return textResult(answer);
+  const answer   = await askPerplexity(original);
+  return {
+    id,
+    title: `Fullt svar for: ${original}`,
+    text: answer,
+    url: null,
+    metadata: null,
+  };
 }
 
 /* 6 – HTTP handler */
@@ -66,7 +80,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   res.setHeader("Access-Control-Allow-Headers", "*");
   if (req.method === "OPTIONS") return res.status(204).end();
 
-  // ----- SSE server_hello
+  // ----- SSE handshake (server_hello)
   if (req.method === "GET") {
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache");
@@ -77,14 +91,15 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
           method: "server_hello",
           params: {
             protocolVersion: "2025-03-26",
-            serverInfo: { name: "Perplexity‑MCP", version: "0.3.0" },
+            serverInfo: { name: "Perplexity‑MCP", version: "0.4.0" },
             capabilities: { tools: { listChanged: false } },
-            instructions: "Bruk verktøyene search og fetch",
+            instructions:
+              "Bruk verktøyene \"search\" og \"fetch\" for å spørre Perplexity. \n• search(query) → korte treff med id  \n• fetch(id)    → fullt svar",
           },
         }) +
         "\n\n",
     );
-    return; // keep-alive
+    return; // keep connection open (client will close)
   }
 
   // ----- POST JSON‑RPC
@@ -94,41 +109,74 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
 
     /* initialize */
     if (method === "initialize") {
-      return ok(res, {
+      return okJson(res, {
         jsonrpc: "2.0",
         id,
         result: {
           protocolVersion: "2025-03-26",
-          serverInfo: { name: "Perplexity‑MCP", version: "0.3.0" },
+          serverInfo: { name: "Perplexity‑MCP", version: "0.4.0" },
           capabilities: { tools: { listChanged: false } },
-          instructions: "Bruk verktøyene search og fetch",
+          instructions:
+            "Bruk verktøyene \"search\" og \"fetch\" for å spørre Perplexity. \n• search(query) → korte treff med id  \n• fetch(id)    → fullt svar",
         },
       });
     }
 
     /* tools/list */
     if (method === "tools/list") {
-      return ok(res, {
+      return okJson(res, {
         jsonrpc: "2.0",
         id,
         result: {
           tools: [
             {
               name: "search",
-              description: "Søker via Perplexity Sonar‑pro",
+              description:
+                "Søk i Perplexity Sonar‑pro. Returnerer et kort sammendrag i \"text\" samt en \"id\" som kan brukes i fetch.",
               inputSchema: {
                 type: "object",
                 properties: { query: { type: "string" } },
                 required: ["query"],
               },
+              outputSchema: {
+                type: "object",
+                properties: {
+                  results: {
+                    type: "array",
+                    items: {
+                      type: "object",
+                      properties: {
+                        id: { type: "string" },
+                        title: { type: "string" },
+                        text: { type: "string" },
+                        url: { type: ["string", "null"] },
+                      },
+                      required: ["id", "title", "text"],
+                    },
+                  },
+                },
+                required: ["results"],
+              },
             },
             {
               name: "fetch",
-              description: "Henter fulltekst fra Perplexity basert på ID",
+              description:
+                "Hent fullt svar fra Perplexity for en tidligere søke‑id og gjør det tilgjengelig for sitering.",
               inputSchema: {
                 type: "object",
                 properties: { id: { type: "string" } },
                 required: ["id"],
+              },
+              outputSchema: {
+                type: "object",
+                properties: {
+                  id: { type: "string" },
+                  title: { type: "string" },
+                  text: { type: "string" },
+                  url: { type: ["string", "null"] },
+                  metadata: { type: ["object", "null"], additionalProperties: { type: "string" } },
+                },
+                required: ["id", "title", "text"],
               },
             },
           ],
@@ -139,22 +187,30 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     /* tools/call */
     if (method === "tools/call") {
       const { name, arguments: args } = params ?? {};
+
       switch (name) {
         case "search": {
           const { query } = SearchInput.parse(args);
-          return ok(res, { jsonrpc: "2.0", id, result: await doSearch(query) });
+          return okJson(res, { jsonrpc: "2.0", id, result: await doSearch(query) });
         }
         case "fetch": {
           const { id: fid } = FetchInput.parse(args);
-          return ok(res, { jsonrpc: "2.0", id, result: await doFetch(fid) });
+          return okJson(res, { jsonrpc: "2.0", id, result: await doFetch(fid) });
         }
         default:
           return rpcError(res, id, -32601, `Ukjent tool: ${name}`);
       }
     }
 
+    // Unknown method
     return rpcError(res, id, -32601, `Ukjent metode: ${method}`);
   } catch (err: unknown) {
-    return rpcError(res, null, -32603, err instanceof Error ? err.message : String(err));
+    console.error("⛔️ Internal MCP‑error", err);
+    return rpcError(
+      res,
+      null,
+      -32603,
+      err instanceof Error ? err.message : String(err),
+    );
   }
 }
