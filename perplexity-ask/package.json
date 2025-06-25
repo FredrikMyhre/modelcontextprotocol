@@ -8,6 +8,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.11.24",
+    "@vercel/node": "latest",
     "typescript": "^5.8.3"
   }
 }
